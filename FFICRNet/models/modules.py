@@ -5,8 +5,8 @@ from einops import rearrange
 from sympy import false
 
 
-#############################################  核心子模块1：DWT+IDWT  #############################################
-# 无损下/上采样 (DWT / IDWT)
+#############################################  DWT+IDWT  #############################################
+
 class DWT2D(nn.Module):
     def __init__(self):
         super().__init__()
@@ -34,62 +34,61 @@ class IDWT2D(nn.Module):
         return out
 
 
-##########################################  核心子模块2：EPI空角几何交互模块  ##########################################
-# 用于浅层特征提取
+##########################################  EPI Spatial-Angular Geometry Interaction Module  ##########################################
+# Shallow Feature Extraction
 class EPI_SpatialAngularBlock(nn.Module):
     def __init__(self, dim, ang_res):
         super().__init__()
         self.ang_res = ang_res
-        # 1. 水平 EPI (U, W) 提取，捕捉水平视差几何
+        # Horizontal EPI (U, W) extraction , capture horizontal parallax geometry
         self.epi_horiz_conv = nn.Sequential(
             nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1, bias=False),
             nn.LeakyReLU(negative_slope=0.1, inplace=True),
             nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1, bias=False))
 
-        # 2. 垂直 EPI (V, H) 提取，捕捉垂直视差几何
+        # Vertical EPI (V, H) extraction , capture vertical parallax geometry
         self.epi_vert_conv = nn.Sequential(
             nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1, bias=False),
             nn.LeakyReLU(negative_slope=0.1, inplace=True),
             nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1, bias=False))
 
-        # 融合这两种几何特征
         self.fuse = nn.Conv2d(in_channels=dim*2, out_channels=dim, kernel_size=1, stride=1, padding=0, bias=False)
 
     def forward(self, x):
         # x shape: [(b u v),c,h,w]
         b = x.shape[0]//(self.ang_res**2)
 
-        # === 分支 1: 水平 EPI 处理 (Horizontal) ===
+        # (Horizontal)
         x_horiz = rearrange(x, '(b u v) c h w -> (b u) c v h w', b=b, u=self.ang_res, v=self.ang_res)
         feat_horiz = self.epi_horiz_conv(x_horiz)
         feat_horiz = rearrange(feat_horiz, '(b u) c v h w -> (b u v) c h w', b=b, u=self.ang_res)
 
-        # === 分支 2: 垂直 EPI 处理 (Vertical) ===
+        # (Vertical)
         x_vert = rearrange(x, '(b u v) c h w -> (b v) c u h w', b=b, u=self.ang_res, v=self.ang_res)
         feat_vert = self.epi_vert_conv(x_vert)
         feat_vert = rearrange(feat_vert, '(b v) c u h w -> (b u v) c h w', b=b, v=self.ang_res)
 
-        # === 特征深层聚合 ===
+        # Deep Feature Aggregation
         # [(b u v),2c,h,w]
         feat_cat = torch.cat((feat_horiz, feat_vert), dim=1)
         out = self.fuse(feat_cat)
         return out + x
 
 
-##########################################  核心子模块3：渐进式高低频交互级联模块  ##########################################
+########################################## Progressive High-Low Frequency Interaction Cascade Module  ##########################################
 class CascadedFreqBlock(nn.Module):
     def __init__(self, dim, ang_res):
         super().__init__()
         self.dwt = DWT2D()
         self.idwt = IDWT2D()
 
-        # 低频分支：EPI 级联 MDTA
+        # Low-frequency branch: EPI cascaded MDTA
         self.ll_branch = EPI_LLTransformerBranch(dim, ang_res)
 
-        # 高频分支：空间 -> EPI 级联方向感知网络
+        # High-frequency Branch: Spatial -> EPI Cascade Direction-Aware Network
         self.hf_branch = EPI_HFCNNBranch(dim, ang_res)
 
-        # 跨频段特征交叉注意力
+        # Cross-Frequency Feature Cross-Attention
         self.interaction = FeatureInteraction(dim)
 
         self.conv = nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1, bias=False)
@@ -98,14 +97,14 @@ class CascadedFreqBlock(nn.Module):
         # x shape: [(b u v),c,h,w]
         ll, lh, hl, hh = self.dwt(x)
 
-        # 低频处理
+        # Low-frequency processing
         ll_feat = self.ll_branch(ll)
 
-        # 高频处理
+        # High-frequency processing
         lh_feat, hl_feat, hh_feat = self.hf_branch(lh, hl, hh)
         hf_feat = torch.cat((lh_feat, hl_feat, hh_feat), dim=1)
 
-        # CF-CCA 高低频交叉引导融合
+        # High-Low Frequency Cross-Guided Fusion
         ll_inter, hf_inter = self.interaction(ll_feat, hf_feat)
 
         ll_out = ll_inter
@@ -116,8 +115,8 @@ class CascadedFreqBlock(nn.Module):
         return out + x
 
 
-##########################################  低频分支  ##########################################
-# 低频主干网络
+##########################################  Low-frequency branch  ##########################################
+# Low-frequency backbone network
 class EPI_LLTransformerBranch(nn.Module):
     def __init__(self, dim, ang_res):
         super().__init__()
@@ -128,24 +127,24 @@ class EPI_LLTransformerBranch(nn.Module):
         return out
 
 
-# EPI 视差全局注意力块
+# EPI Disparity Global Attention Block
 class EPI_MDTA_Block(nn.Module):
     def __init__(self, dim, ang_res):
         super().__init__()
-        # 1. 空间 MDTA
+        # Spatial MDTA
         self.ang_res = ang_res
         self.norm_sp1 = LayerNorm2d(dim)
         self.attn_sp = MDTA(dim)
         self.norm_sp2 = LayerNorm2d(dim)
         self.ffn_sp = FFNet(dim)
 
-        # 2. 水平 EPI MDTA (提取 V 和 W)
+        # Horizontal EPI MDTA ( V , W)
         self.norm_h1 = LayerNorm2d(dim)
         self.attn_h = MDTA(dim)
         self.norm_h2 = LayerNorm2d(dim)
         self.ffn_h = FFNet(dim)
 
-        # 3. 垂直 EPI MDTA (提取 U 和 H)
+        # Vertical EPI MDTA ( U , H)
         self.norm_v1 = LayerNorm2d(dim)
         self.attn_v = MDTA(dim)
         self.norm_v2 = LayerNorm2d(dim)
@@ -157,30 +156,30 @@ class EPI_MDTA_Block(nn.Module):
         buv, c, h, w = x.shape
         b = buv//(self.ang_res**2)
 
-        # 先进行空间Transformer
+        # Spatial Transformer
         x_sp = x
         x_sp = x_sp + self.attn_sp(self.norm_sp1(x_sp))
         x_sp = x_sp + self.ffn_sp(self.norm_sp2(x_sp))
 
-        # 分支 A：水平 EPI (V, W)
+        # Horizontal EPI (V, W)
         x_h = rearrange(x_sp, '(b u v) c h w -> (b u h) c v w', b=b, u=self.ang_res, v=self.ang_res)
         x_h = x_h + self.attn_h(self.norm_h1(x_h))
         x_h = x_h + self.ffn_h(self.norm_h2(x_h))
         x_h = rearrange(x_h, '(b u h) c v w -> (b u v) c h w', b=b, u=self.ang_res, h=h)
 
-        # 分支 B：垂直 EPI (U, H)
+        # Vertical EPI (U, H)
         x_v = rearrange(x_sp, '(b u v) c h w -> (b v w) c u h', b=b, u=self.ang_res, v=self.ang_res)
         x_v = x_v + self.attn_v(self.norm_v1(x_v))
         x_v = x_v + self.ffn_v(self.norm_v2(x_v))
         x_v = rearrange(x_v, '(b v w) c u h -> (b u v) c h w', b=b, v=self.ang_res, w=w)
 
-        # 融合 EPI 特征并加上全局块残差
+        # Fuse EPI features and add global block residuals
         cat_feat = torch.cat((x_h, x_v), dim=1)  # (buv, c, h, w)
         fused_feat = self.fuse_conv(cat_feat)
         return fused_feat + x
 
 
-#  MDTA 跨通道全局特征提取
+#  MDTA Cross-Channel Global Feature Extraction
 class LayerNorm2d(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -236,16 +235,16 @@ class FFNet(nn.Module):
         return out
 
 
-##########################################  高频分支  ##########################################
-# 空间 -> EPI 级联方向感知网络
+##########################################  High-frequency branch  ##########################################
+# Space -> EPI Cascade Direction-Aware Network
 class EPI_HFCNNBranch(nn.Module):
     def __init__(self, dim, ang_res):
         super().__init__()
         self.ang_res = ang_res
-        # 1. 空间域方向提取
+        # 1. Spatial domain direction extraction
         self.spa_extract = SpatialDirectionAwareBlock(dim)
 
-        # 2. EPI 域方向提取
+        # 2. EPI domain direction extraction
         self.epi_extract = EPIDirectionAwareBlock(dim, ang_res)
 
         self.lh_conv = nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=(1, 3), stride=1, padding=(0, 1), bias=False)
@@ -253,13 +252,13 @@ class EPI_HFCNNBranch(nn.Module):
         self.hh_conv = nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=(3, 3), stride=1, padding=(1, 1), bias=False)
 
     def forward(self, lh, hl, hh):
-        # 空间域 (H, W) 高频方向提取
+        # Spatial Domain (H, W) High-Frequency Direction Extraction
         spa_lh, spa_hl, spa_hh = self.spa_extract(lh, hl, hh)
 
-        # EPI域 高频方向提取
+        # EPI plane high-frequency direction extraction
         epi_lh, epi_hl, epi_hh = self.epi_extract(spa_lh, spa_hl, spa_hh)
 
-        # 融合 EPI 特征
+        # Fuse EPI features
         feat_lh = self.lh_conv(epi_lh) + lh
         feat_hl = self.hl_conv(epi_hl) + hl
         feat_hh = self.hh_conv(epi_hh) + hh
@@ -280,7 +279,7 @@ class SpatialDirectionAwareBlock(nn.Module):
         return feat_lh, feat_hl, feat_hh
 
 
-# 基础残差方向提取块 (1x3, 3x1 拆分思想)
+# Basic Residual Direction Extraction Block (1×3, 3×1)
 class HorizontalResBlock(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -337,7 +336,7 @@ class ResBlock(nn.Module):
         return buffer + x
 
 
-# EPI平面方向提取块
+# EPI plane direction extraction block
 class EPIDirectionAwareBlock(nn.Module):
     def __init__(self, dim, ang_res):
         super().__init__()
@@ -363,7 +362,7 @@ class HorizontalEPIResBlock(nn.Module):
         buv, _, h, w = x.shape
         b = (x.shape[0] // (self.ang_res**2))
 
-        # 水平 EPI (V, W)
+        # Horizontal EPI (V, W)
         x_h = rearrange(x, '(b u v) c h w -> (b u h) c v w', b=b, u=self.ang_res, v=self.ang_res)
         feat_h = self.hepi_block(x_h)
         out_h = rearrange(feat_h, '(b u h) c v w -> (b u v) c h w', b=b, u=self.ang_res, h=h)
@@ -380,7 +379,7 @@ class VerticalEPIResBlock(nn.Module):
         buv, _, h, w = x.shape
         b = (x.shape[0] // (self.ang_res**2))
 
-        # 垂直 EPI (U, H)
+        # Vertical EPI (U, H)
         x_v = rearrange(x, '(b u v) c h w -> (b v w) c u h', b=b, u=self.ang_res, v=self.ang_res)
         feat_v = self.vepi_block(x_v)
         out_v = rearrange(feat_v, '(b v w) c u h -> (b u v) c h w', b=b, v=self.ang_res, w=w)
@@ -403,7 +402,6 @@ class DiagonalEPIResBlock(nn.Module):
         feat_h = self.hepi_block(x_h)
         feat_h = rearrange(feat_h, '(b u h) c v w -> (b u v) c h w', b=b, u=self.ang_res, h=h)
 
-        # 分支 B：垂直 EPI (U, H)
         x_v = rearrange(x, '(b u v) c h w -> (b v w) c u h', b=b, u=self.ang_res, v=self.ang_res)
         feat_v = self.vepi_block(x_v)
         feat_v = rearrange(feat_v, '(b v w) c u h -> (b u v) c h w', b=b, v=self.ang_res, w=w)
@@ -413,7 +411,7 @@ class DiagonalEPIResBlock(nn.Module):
         return out_hv
 
 
-############################################  特征交互模块  ##########################################
+############################################  Feature Interaction Module  ##########################################
 class FeatureInteraction(nn.Module):
     def __init__(self, dim, num_heads=1):
         super().__init__()
@@ -421,7 +419,7 @@ class FeatureInteraction(nn.Module):
         self.temperature1 = nn.Parameter(torch.ones(num_heads, 1, 1))
         self.temperature2 = nn.Parameter(torch.ones(num_heads, 1, 1))
 
-        # 低频 (LL) 生成 Q, K, V 的映射层
+        # Low-frequency (LL) projection layers for generating Q, K, V
         self.q_ll = nn.Sequential(
             nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=1, stride=1, padding=0, bias=False),
             nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, stride=1, padding=1, groups=dim, bias=False))
@@ -430,7 +428,7 @@ class FeatureInteraction(nn.Module):
             nn.Conv2d(in_channels=dim, out_channels=dim*2, kernel_size=1, stride=1, padding=0, bias=False),
             nn.Conv2d(in_channels=dim*2, out_channels=dim*2, kernel_size=3, stride=1, padding=1, groups=dim, bias=False))
 
-        # 高频 (HF) 生成 Q, K, V 的映射层
+        # High-frequency (HF) projection layers for generating Q, K, V
         self.q_hf = nn.Sequential(
             nn.Conv2d(in_channels=dim*3, out_channels=dim*3, kernel_size=1, stride=1, padding=0, bias=False),
             nn.Conv2d(in_channels=dim*3, out_channels=dim*3, kernel_size=3, stride=1, padding=1, groups=dim*3, bias=False))
@@ -439,37 +437,37 @@ class FeatureInteraction(nn.Module):
             nn.Conv2d(in_channels=dim*3, out_channels=dim*3*2, kernel_size=1, stride=1, padding=0, bias=False),
             nn.Conv2d(in_channels=dim*3*2, out_channels=dim*3*2, kernel_size=3, stride=1, padding=1, groups=dim*3*2, bias=False))
 
-        # 注意力结果投影
+        # Attention projection
         self.proj_ll = nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=1, stride=1, padding=0, bias=False)
         self.proj_hf = nn.Conv2d(in_channels=dim*3, out_channels=dim*3, kernel_size=1, stride=1, padding=0, bias=False)
 
     def forward(self, ll, hf):
         b, c, h, w = ll.shape
 
-        # 边缘引导光照 (HF guides LL): 防止提亮产生光晕
+        # HF guides LL
         q_l = self.q_ll(ll)
         q_l = rearrange(q_l, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
 
-        # HF 作为 Key, Value (提供物理结构先验)
+        # HF as Key, Value 
         k_h, v_h = self.kv_hf(hf).chunk(2, dim=1)
         k_h = rearrange(k_h, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
         v_h = rearrange(v_h, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
 
-        # L2 归一化后计算跨频段 Attention
+        # Attention
         q_l = F.normalize(q_l, dim=-1)
         k_h = F.normalize(k_h, dim=-1)
         attn_ll = (q_l @ k_h.transpose(-2, -1)) * self.temperature1
         attn_ll = attn_ll.softmax(dim=-1)
 
-        # 得到结构约束后的低频特征
+        # low-frequency features after structural constraint
         out_ll = rearrange(attn_ll @ v_h, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
         ll_inter = self.proj_ll(out_ll) + ll   # 跨域残差
 
-        # 光照约束边缘 (LL guides HF): 防止放大暗区噪点
+        # LL guides HF
         q_h = self.q_hf(hf)
         q_h = rearrange(q_h, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
 
-        # LL 作为 Key, Value (提供光照/照度环境)
+        # LL as Key, Value 
         k_l, v_l = self.kv_ll(ll).chunk(2, dim=1)
         k_l = rearrange(k_l, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
         v_l = rearrange(v_l, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
@@ -479,9 +477,9 @@ class FeatureInteraction(nn.Module):
         attn_hf = (q_h @ k_l.transpose(-2, -1)) * self.temperature2
         attn_hf = attn_hf.softmax(dim=-1)
 
-        # 得到光照约束后的高频特征
+        # High-frequency features after illumination constraint
         out_hf = rearrange(attn_hf @ v_l, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
-        hf_inter = self.proj_hf(out_hf) + hf  # 跨域残差
+        hf_inter = self.proj_hf(out_hf) + hf  # Cross-domain residual
         return ll_inter, hf_inter
 
 
@@ -502,7 +500,7 @@ class ChannelAttention(nn.Module):
         return out
 
 
-# 7. 运行测试代码
+
 if __name__ == "__main__":
     import cv2
     import numpy as np
