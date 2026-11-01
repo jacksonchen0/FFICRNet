@@ -461,7 +461,7 @@ class FeatureInteraction(nn.Module):
 
         # low-frequency features after structural constraint
         out_ll = rearrange(attn_ll @ v_h, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
-        ll_inter = self.proj_ll(out_ll) + ll   # 跨域残差
+        ll_inter = self.proj_ll(out_ll) + ll   # Cross-domain residual
 
         # LL guides HF
         q_h = self.q_hf(hf)
