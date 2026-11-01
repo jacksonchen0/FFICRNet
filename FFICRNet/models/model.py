@@ -6,7 +6,7 @@ from einops import rearrange
 from models.modules import *
 
 
-#############################################  主网络：低光光场增强网络  #############################################
+#############################################  Main Network: Low-Light Light Field Enhancement Network  #############################################
 class Build_LLLFENet(nn.Module):
     def __init__(self, arg):
         super(Build_LLLFENet, self).__init__()
@@ -34,17 +34,17 @@ class Build_LLLFENet(nn.Module):
     def forward(self, in_lf):
         # [0,1] shape: (b c u v h w)
 
-        # 1. 浅层特征提取与光照调制
-        x_4d = rearrange(in_lf, 'b c u v h w -> (b u v) c h w')   # 空间特征提取
+        # 1. Shallow Feature Extraction and Illumination Modulation
+        x_4d = rearrange(in_lf, 'b c u v h w -> (b u v) c h w')   # Spatial Feature Extraction
         feat_in_4d = self.conv_in(x_4d)             # [(b u v) c h w]
         feat_in_4d = self.encoder(feat_in_4d)       # [(b u v) c h w]
 
-        # 2.渐进式频段交互循环
+        # 2.Progressive Frequency Band Interaction Loop
         feat_out_4d = feat_in_4d
         for cascade_block in self.cascaded_bottlenecks:
             feat_out_4d = cascade_block(feat_out_4d)      # [(b u v) c h w]
 
-        # 3. 解码与输出
+        # 3. Decoding and Output
         out_x1 = self.conv_out1(feat_out_4d)
         out_x2 = self.conv_out2(feat_out_4d)
         out_lf = out_x1 * x_4d + out_x2
